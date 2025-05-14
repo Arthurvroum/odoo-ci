@@ -46,9 +46,13 @@ class OdooDockerGenerator:
         config_path = config_dir / 'odoo.conf'
         addons_path = '/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons'
         
-        # Ajouter les chemins d'addons Enterprise
+        # Ajouter les chemins d'addons selon l'édition
         if is_enterprise:
-            addons_path += ',/mnt/enterprise,/mnt/custom-addons'
+            # Pour l'édition Enterprise, on pointe vers les différents chemins d'addons
+            addons_path += ',/mnt/enterprise/odoo/addons,/mnt/enterprise-addons,/mnt/custom-addons'
+        else:
+            # Pour l'édition Community
+            addons_path += ',/mnt/custom-addons'
         
         config = configparser.ConfigParser()
         config['options'] = {
@@ -232,6 +236,9 @@ class OdooDockerGenerator:
             # Ajouter le volume pour monter le dossier enterprise complet
             vols.append('./enterprise:/mnt/enterprise:ro')
             
+            # Variable pour suivre si on a configuré les addons Enterprise
+            enterprise_addons_configured = False
+            
             if enterprise_token:
                 if self._download_enterprise_archive(version, enterprise_token, enterprise_dir):
                     print(f"Modules Enterprise téléchargés dans {enterprise_dir}")
@@ -239,7 +246,8 @@ class OdooDockerGenerator:
                     addons_path = enterprise_dir / "odoo" / "addons"
                     if addons_path.exists():
                         # Monter le chemin spécifique vers odoo/addons
-                        vols.append('./enterprise/odoo/addons:/mnt/custom-addons:rw')
+                        vols.append('./enterprise/odoo/addons:/mnt/enterprise-addons:rw')
+                        enterprise_addons_configured = True
                         print(f"Module Enterprise détecté dans {addons_path}, montage configuré")
                     else:
                         # Chercher les addons au premier niveau
@@ -247,7 +255,8 @@ class OdooDockerGenerator:
                         # Vérifier si des modules sont directement dans le dossier enterprise
                         modules_direct = [f for f in enterprise_dir.glob("*/__manifest__.py")]
                         if modules_direct:
-                            vols.append('./enterprise:/mnt/custom-addons:rw')
+                            vols.append('./enterprise:/mnt/enterprise-addons:rw')
+                            enterprise_addons_configured = True
                             print(f"Modules Enterprise trouvés directement dans {enterprise_dir}, montage configuré")
                         else:
                             # Chercher tous les sous-dossiers qui pourraient contenir des addons
@@ -255,32 +264,34 @@ class OdooDockerGenerator:
                             if potential_addons_dirs:
                                 # Prendre le premier trouvé
                                 relative_path = os.path.relpath(potential_addons_dirs[0], inst)
-                                vols.append(f'./{relative_path}:/mnt/custom-addons:rw')
+                                vols.append(f'./{relative_path}:/mnt/enterprise-addons:rw')
+                                enterprise_addons_configured = True
                                 print(f"Dossier addons trouvé à {relative_path}, montage configuré")
                             else:
                                 print("AVERTISSEMENT: Aucun dossier addons trouvé dans l'archive Enterprise!")
                                 # Monter quand même le dossier enterprise complet au cas où
-                                vols.append('./enterprise:/mnt/custom-addons:rw')
+                                vols.append('./enterprise:/mnt/enterprise-addons:rw')
+                                enterprise_addons_configured = True
                 else:
                     print("AVERTISSEMENT: Le téléchargement Enterprise a échoué.")
-                    if external_addons_path:
-                        path = Path(external_addons_path)
-                        if path.is_dir():
-                            print(f"Utilisation du chemin direct: {path}")
-                            vols.append(f"{path.resolve()}:/mnt/custom-addons:rw")
-                        else:
-                            print(f"Warning: Le chemin d'addons externe '{path}' n'existe pas")
-            elif external_addons_path:
+            
+            # Gestion du chemin d'addons externe (indépendamment du token Enterprise)
+            if external_addons_path:
                 path = Path(external_addons_path)
                 if path.is_dir():
-                    print(f"Utilisation du chemin direct: {path}")
+                    print(f"Utilisation du chemin d'addons externe: {path}")
                     vols.append(f"{path.resolve()}:/mnt/custom-addons:rw")
+                    print(f"Addons externes montés depuis {path}")
                 else:
                     print(f"Warning: Le chemin d'addons externe '{path}' n'existe pas")
+            elif not enterprise_addons_configured:
+                # Si aucun addons externes et pas d'addons Enterprise, afficher un avertissement
+                print("AVERTISSEMENT: Aucun chemin d'addons configuré!")
         elif external_addons_path:
             path = Path(external_addons_path)
             if path.is_dir():
                 vols.append(f"{path.resolve()}:/mnt/custom-addons:rw")
+                print(f"Addons externes montés depuis {path}")
             else:
                 print(f"Warning: Le chemin d'addons externe '{path}' n'existe pas")
         
@@ -356,7 +367,6 @@ docker-compose up -d
 Accédez à Odoo via votre navigateur à l'adresse:
 http://localhost:{port}
 
-Identifiants par défaut: admin / admin
 """)
         
         print(f"Généré: {out}")
@@ -386,7 +396,6 @@ Identifiants par défaut: admin / admin
             
             port = yaml.safe_load(compose_file.read_text())['services']['odoo']['ports'][0].split(':')[0]
             print(f"Odoo accessible: http://localhost:{port}")
-            print("Identifiants par défaut: admin / admin")
         except subprocess.CalledProcessError as e:
             print(f"Erreur lors du démarrage des conteneurs: {e}")
         except Exception as e:
