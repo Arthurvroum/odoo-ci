@@ -34,14 +34,21 @@ class OdooDockerGenerator:
         self.base_dir = Path(os.path.dirname(os.path.abspath(__file__)))
         self.output_dir = Path(base_output_dir) if base_output_dir else self.base_dir / "docker-compose-files"
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Créer un répertoire cache pour stocker les archives téléchargées
+        self.cache_dir = self.base_dir / "enterprise_cache"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Dossier cache pour les archives Enterprise: {self.cache_dir}")
 
-    def _create_odoo_config(self, config_dir, is_enterprise=False):
+    def _create_odoo_config(self, config_dir, is_enterprise=False, db_name='postgres', fresh_install=True):
         """
         Crée le fichier de configuration odoo.conf
         
         Args:
             config_dir: Chemin vers le dossier de configuration
             is_enterprise: Si True, ajoute la configuration Enterprise
+            db_name: Nom de la base de données
+            fresh_install: Si True, permet de configurer Odoo via l'interface web
         """
         config_path = config_dir / 'odoo.conf'
         addons_path = '/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons'
@@ -56,8 +63,6 @@ class OdooDockerGenerator:
         
         config = configparser.ConfigParser()
         config['options'] = {
-            '; password admin': '',
-            'admin_passwd': 'admin',
             '; chemins addons': '',
             'addons_path': addons_path,
             '; DB': '',
@@ -68,26 +73,69 @@ class OdooDockerGenerator:
             'http_port': '8069'
         }
         
+        # Configuration spécifique selon le mode d'installation
+        if fresh_install:
+            # En mode installation fraîche, on permet la création de base de données
+            config['options']['list_db'] = 'True'
+            config['options']['admin_passwd'] = 'admin'  # Mot de passe master pour créer des BDs
+            # Ne pas spécifier de db_name pour afficher la page de création de BD
+        else:
+            # Mode préconfigué
+            config['options']['admin_passwd'] = 'admin'
+            config['options']['db_name'] = db_name
+        
         with open(config_path, 'w') as f:
             config.write(f)
 
     def _download_enterprise_archive(self, version: str, token: str, target_dir: Path, browser_fallback=False):
         """
         Télécharge et extrait l'archive Enterprise pour la version depuis odoo.com.
-        Utilise plusieurs méthodes et tente d'extraire l'URL directe depuis la page de remerciement.
+        Utilise le cache si disponible pour éviter les téléchargements redondants.
         
         Args:
             version: Version d'Odoo (ex: "18.0")
             token: Token d'accès Enterprise
-            target_dir: Répertoire où télécharger/extraire l'archive
+            target_dir: Répertoire où extraire l'archive
             browser_fallback: Paramètre conservé pour compatibilité mais ignoré
             
         Returns:
-            bool: True si le téléchargement a réussi, False sinon
+            bool: True si le téléchargement/extraction a réussi, False sinon
         """
         target_dir.mkdir(parents=True, exist_ok=True)
-        archive_path = target_dir / f"odoo-enterprise-{version}.tar.gz"
         
+        # Vérifier si cette version est déjà en cache
+        cached_archive_path = self.cache_dir / f"odoo-enterprise-{version}.tar.gz"
+        if cached_archive_path.exists():
+            print(f"Archive Odoo Enterprise {version} trouvée dans le cache ({cached_archive_path})")
+            print(f"Extraction de l'archive depuis le cache vers {target_dir}...")
+            try:
+                # Extraire depuis le cache
+                with tarfile.open(cached_archive_path, 'r:gz') as tar:
+                    # Extraire le contenu directement dans le répertoire cible
+                    members = tar.getmembers()
+                    # Si l'archive a un dossier racine (comme "enterprise"), extraire son contenu
+                    root_dirs = {m.name.split('/')[0] for m in members if '/' in m.name}
+                    if len(root_dirs) == 1:
+                        # Extraire en ignorant le dossier racine
+                        top_dir = next(iter(root_dirs))
+                        print(f"Extraction du contenu du dossier {top_dir} directement dans {target_dir}")
+                        for m in members:
+                            if m.name.startswith(f"{top_dir}/"):
+                                # Renommer pour ignorer le dossier racine
+                                m.name = m.name[len(top_dir)+1:]
+                                # Ne pas extraire les dossiers vides
+                                if m.name:
+                                    tar.extract(m, path=target_dir)
+                    else:
+                        # Extraire directement
+                        tar.extractall(path=target_dir)
+                print(f"Extraction depuis le cache réussie dans {target_dir}")
+                return True
+            except Exception as e:
+                print(f"Erreur lors de l'extraction depuis le cache: {e}")
+                # Continuer avec le téléchargement en ligne en cas d'erreur
+        
+        # Si pas en cache ou extraction échouée, télécharger
         # Version courte pour les URLs
         short_version = version.replace('.0', '')
         
@@ -138,15 +186,18 @@ class OdooDockerGenerator:
                 total_size = int(download_response.headers.get('Content-Length', 0))
                 print(f"Taille de l'archive: {total_size/1024/1024:.1f} MB")
                 
-                with open(archive_path, 'wb') as f:
+                # Télécharger dans le cache d'abord
+                with open(cached_archive_path, 'wb') as f:
                     for chunk in download_response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
                 
-                # Extraire l'archive
+                print(f"Archive téléchargée et mise en cache dans {cached_archive_path}")
+                
+                # Extraire l'archive depuis le cache vers le dossier cible
                 try:
-                    print(f"Extraction de l'archive dans {target_dir}...")
-                    with tarfile.open(archive_path, 'r:gz') as tar:
+                    print(f"Extraction de l'archive vers {target_dir}...")
+                    with tarfile.open(cached_archive_path, 'r:gz') as tar:
                         # Extraire le contenu directement dans le répertoire cible
                         members = tar.getmembers()
                         # Si l'archive a un dossier racine (comme "enterprise"), extraire son contenu
@@ -183,7 +234,7 @@ class OdooDockerGenerator:
 
     def generate_docker_compose(self, version, edition,
                               port=8069, external_addons_path=None,
-                              enterprise_token=None):
+                              enterprise_token=None, fresh_install=True):
         """
         Génère docker-compose.yml et télécharge le code Enterprise si demandé.
         
@@ -193,6 +244,7 @@ class OdooDockerGenerator:
             port: Port à exposer
             external_addons_path: Chemin vers des addons externes
             enterprise_token: Token pour l'édition Enterprise
+            fresh_install: Si True, permet de configurer Odoo via l'interface web
             
         Returns:
             Path: Chemin vers le fichier docker-compose.yml généré
@@ -206,7 +258,28 @@ class OdooDockerGenerator:
         # Créer le dossier d'instance
         name = f"odoo-{version}-{edition}"
         inst = self.output_dir / name
+        
+        # Générer un nom de base de données unique pour cette instance
+        # en utilisant la version, l'édition et le port
+        db_name = f"odoo_{version.replace('.', '_')}_{edition}_{port}"
+        
+        # Si le dossier existe déjà, ajouter un suffixe pour garantir l'unicité
+        suffix = 1
+        original_inst = inst
+        while inst.exists():
+            inst = original_inst.with_name(f"{original_inst.name}_{suffix}")
+            db_name = f"odoo_{version.replace('.', '_')}_{edition}_{port}_{suffix}"
+            suffix += 1
+        
         inst.mkdir(parents=True, exist_ok=True)
+        print(f"Création d'une nouvelle instance Odoo dans {inst}")
+        print(f"Base de données unique: {db_name}")
+        
+        # Générer un nom de projet Docker Compose unique pour cette instance
+        # pour isoler complètement les réseaux et volumes
+        project_name = f"odoo_{version.replace('.', '')}_{edition}_{port}"
+        if suffix > 1:
+            project_name = f"{project_name}_{suffix}"
         
         # Créer les sous-dossiers
         dirs = {k: inst / f"odoo-data/{k}" for k in ['addons', 'etc', 'filestore']}
@@ -214,12 +287,17 @@ class OdooDockerGenerator:
         for d in dirs.values(): 
             d.mkdir(parents=True, exist_ok=True)
         
-        # Créer le fichier de configuration
-        self._create_odoo_config(dirs['etc'], is_enterprise=is_ee)
+        # Créer le fichier de configuration avec le nom de la DB
+        # Si fresh_install est True, ne pas spécifier de DB ni de mot de passe admin
+        self._create_odoo_config(dirs['etc'], is_enterprise=is_ee, db_name=db_name, fresh_install=fresh_install)
+        
+        # Générer des noms de volumes uniques basés sur le nom du projet Docker Compose
+        odoo_volume_name = f"{project_name}_odoo_data"
+        postgres_volume_name = f"{project_name}_postgres_data"
         
         # Préparer les volumes
         vols = [
-            'odoo-data:/var/lib/odoo',
+            f'{odoo_volume_name}:/var/lib/odoo',
             './odoo-data/etc:/etc/odoo',
             './odoo-data/addons:/mnt/extra-addons:rw'
         ]
@@ -297,7 +375,7 @@ class OdooDockerGenerator:
         
         # Configuration du service Odoo
         db_env = {
-            'POSTGRES_DB': 'postgres',
+            'POSTGRES_DB': 'postgres',  # Utiliser 'postgres' au lieu du db_name personnalisé pour éviter les erreurs
             'POSTGRES_USER': 'odoo',
             'POSTGRES_PASSWORD': 'odoo',
             'PGHOST': 'db'
@@ -312,7 +390,7 @@ class OdooDockerGenerator:
             'ports': [f"{port}:8069"],
             'environment': env_list,
             # Ajouter les paramètres de connexion à la commande de démarrage d'Odoo
-            'command': '--config=/etc/odoo/odoo.conf',
+            'command': f'--config=/etc/odoo/odoo.conf',
             'volumes': vols,
             'restart': 'always'
         }
@@ -323,18 +401,18 @@ class OdooDockerGenerator:
                 'db': {
                     'image': 'postgres:13',
                     'environment': [
-                        'POSTGRES_DB=postgres',
+                        'POSTGRES_DB=postgres',  # Utiliser 'postgres' au lieu du db_name personnalisé
                         'POSTGRES_USER=odoo',
                         'POSTGRES_PASSWORD=odoo'
                     ],
-                    'volumes': ['postgres-data:/var/lib/postgresql/data'],
+                    'volumes': [f'{postgres_volume_name}:/var/lib/postgresql/data'],
                     'restart': 'always'
                 },
                 'odoo': svc
             },
             'volumes': {
-                'odoo-data': None,
-                'postgres-data': None
+                odoo_volume_name: None,
+                postgres_volume_name: None
             }
         }
         
@@ -353,13 +431,28 @@ class OdooDockerGenerator:
 Cette installation est configurée pour utiliser Odoo {edition.capitalize()} {version}.
 
 - Port: {port}
-- Base de données: PostgreSQL 13
+- Base de données: {db_name} (PostgreSQL 13)
 - Répertoire des modules Enterprise: ./enterprise/odoo/addons
+- Volumes Docker: 
+  - {odoo_volume_name} (pour les données Odoo)
+  - {postgres_volume_name} (pour la base de données)
 
 ## Démarrage
 
 ```bash
 docker-compose up -d
+```
+
+## Arrêt et suppression
+
+Pour arrêter les conteneurs sans supprimer les données:
+```bash
+docker-compose down
+```
+
+Pour arrêter les conteneurs et supprimer également les données:
+```bash
+docker-compose down -v
 ```
 
 ## Utilisation
@@ -370,36 +463,84 @@ http://localhost:{port}
 """)
         
         print(f"Généré: {out}")
-        return out
+        print(f"Volumes Docker uniques créés: {odoo_volume_name}, {postgres_volume_name}")
+        return out, db_name
 
-    def build_and_run(self, compose_file: Path):
+    def build_and_run(self, compose_file: Path, db_name: str, fresh_install=True):
         """
         Construit et démarre les conteneurs Docker
+        
+        Args:
+            compose_file: Chemin vers le fichier docker-compose.yml
+            db_name: Nom de la base de données à utiliser
+            fresh_install: Si True, ne pas initialiser la base de données
         """
         if not compose_file or not compose_file.exists():
             print("Erreur: Fichier docker-compose.yml non trouvé")
             return
+        
+        # Extraire le nom du projet à partir du docker-compose.yml
+        yaml_content = yaml.safe_load(compose_file.read_text())
+        port = yaml_content['services']['odoo']['ports'][0].split(':')[0]
+        
+        # Générer le nom du projet à partir du yaml pour garantir l'unicité
+        volumes = yaml_content['volumes']
+        project_name = None
+        for vol_name in volumes.keys():
+            if vol_name.endswith('_odoo_data'):
+                project_name = vol_name.replace('_odoo_data', '')
+                break
+        
+        if not project_name:
+            # Fallback: utiliser le nom du dossier parent
+            project_name = compose_file.parent.name.replace('-', '_').replace('.', '_')
+        
+        print(f"Utilisation du nom de projet Docker Compose: {project_name}")
+        
+        # Créer un fichier .env pour définir le nom du projet Docker Compose
+        env_file = compose_file.parent / '.env'
+        with open(env_file, 'w') as f:
+            f.write(f"COMPOSE_PROJECT_NAME={project_name}\n")
+        
+        print(f"Fichier .env créé avec COMPOSE_PROJECT_NAME={project_name}")
         
         os.chdir(compose_file.parent)
         try:
             print(f"Construction des conteneurs depuis {compose_file}...")
             subprocess.run(['docker-compose', 'up', '-d', '--build'], check=True)
             
-            print("Attente de 5 secondes pour le démarrage des conteneurs...")
-            time.sleep(5)
+            print("Attente de 10 secondes pour le démarrage complet des conteneurs...")
+            time.sleep(10)
             
-            print("Mise à jour de la liste des modules...")
-            subprocess.run(
-                "docker-compose exec -T odoo odoo -d postgres --stop-after-init -u base",
-                shell=True, check=False
-            )
+            # Vérifier si les conteneurs sont bien démarrés
+            result = subprocess.run(['docker-compose', 'ps'], stdout=subprocess.PIPE, check=True)
+            if "Up" not in result.stdout.decode():
+                print("AVERTISSEMENT: Les conteneurs ne semblent pas être démarrés correctement.")
             
-            port = yaml.safe_load(compose_file.read_text())['services']['odoo']['ports'][0].split(':')[0]
+            # En mode installation fraîche, ne pas initialiser la base de données
+            # pour permettre l'affichage de l'écran de configuration initial
+            if not fresh_install:
+                print(f"Initialisation de la base de données Odoo '{db_name}'...")
+                # Utiliser le nom de base de données spécifique à cette instance
+                subprocess.run(
+                    f"docker-compose exec -T odoo odoo -d {db_name} --stop-after-init -i base",
+                    shell=True, check=False
+                )
+            else:
+                print("Mode installation fraîche: Odoo va démarrer sans base de données préconfiguré")
+                print("Vous pourrez créer une nouvelle base de données via l'interface web")
+            
             print(f"Odoo accessible: http://localhost:{port}")
+            if not fresh_install:
+                print(f"Base de données: {db_name}")
+            print(f"Pour arrêter et supprimer uniquement cette instance, exécutez:")
+            print(f"cd {compose_file.parent} && docker-compose down -v")
         except subprocess.CalledProcessError as e:
             print(f"Erreur lors du démarrage des conteneurs: {e}")
         except Exception as e:
             print(f"Erreur inattendue: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 def main():
@@ -412,6 +553,8 @@ def main():
     parser.add_argument('--addons-path', help="Chemin vers des addons externes ou Enterprise déjà téléchargés")
     parser.add_argument('--enterprise-token', help="Token d'accès pour l'édition Enterprise")
     parser.add_argument('--build', action='store_true', help="Construire et démarrer les conteneurs après génération")
+    parser.add_argument('--configured', action='store_false', dest='fresh_install',
+                        help="Configurer Odoo avec une DB prédéfinie (par défaut: installation fraîche)")
     
     args = parser.parse_args()
     
@@ -423,16 +566,17 @@ def main():
     
     try:
         gen = OdooDockerGenerator(args.output_dir)
-        comp = gen.generate_docker_compose(
+        comp, db_name = gen.generate_docker_compose(
             args.version, 
             args.edition, 
             args.port,
             external_addons_path=args.addons_path,
-            enterprise_token=args.enterprise_token
+            enterprise_token=args.enterprise_token,
+            fresh_install=args.fresh_install
         )
         
         if args.build and comp:
-            gen.build_and_run(comp)
+            gen.build_and_run(comp, db_name, fresh_install=args.fresh_install)
     except Exception as e:
         print(f"Erreur: {e}")
         import traceback
