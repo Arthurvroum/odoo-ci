@@ -18,6 +18,7 @@ import socket
 from pathlib import Path
 from bs4 import BeautifulSoup
 import configparser
+import jinja2
 
 
 class OdooDockerGenerator:
@@ -39,6 +40,25 @@ class OdooDockerGenerator:
         self.cache_dir = self.base_dir / "enterprise_cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         print(f"Dossier cache pour les archives Enterprise: {self.cache_dir}")
+        
+        # Configuration du moteur de template Jinja2
+        self.templates_dir = self.base_dir / "templates"
+        self.templates_dir.mkdir(parents=True, exist_ok=True)
+        self.jinja_env = jinja2.Environment(
+            loader=jinja2.FileSystemLoader(str(self.templates_dir)),
+            autoescape=jinja2.select_autoescape(['html', 'xml']),
+            trim_blocks=True,
+            lstrip_blocks=True
+        )
+        
+        # Créer les templates par défaut s'ils n'existent pas
+        self._ensure_default_templates()
+    
+    def _ensure_default_templates(self):
+        """Crée les templates par défaut s'ils n'existent pas"""
+        # Ne plus créer de templates par défaut dans le code
+        # Les templates sont maintenant dans des fichiers dédiés
+        pass
 
     def _create_odoo_config(self, config_dir, is_enterprise=False, db_name='postgres', fresh_install=True):
         """
@@ -303,6 +323,7 @@ class OdooDockerGenerator:
         ]
         
         # Gérer les addons Enterprise ou externes
+        enterprise_path = None
         if is_ee:
             if not enterprise_token and not external_addons_path:
                 raise ValueError("Token requis pour l'édition Enterprise")
@@ -326,6 +347,7 @@ class OdooDockerGenerator:
                         # Monter le chemin spécifique vers odoo/addons
                         vols.append('./enterprise/odoo/addons:/mnt/enterprise-addons:rw')
                         enterprise_addons_configured = True
+                        enterprise_path = './enterprise/odoo/addons'
                         print(f"Module Enterprise détecté dans {addons_path}, montage configuré")
                     else:
                         # Chercher les addons au premier niveau
@@ -335,6 +357,7 @@ class OdooDockerGenerator:
                         if modules_direct:
                             vols.append('./enterprise:/mnt/enterprise-addons:rw')
                             enterprise_addons_configured = True
+                            enterprise_path = './enterprise'
                             print(f"Modules Enterprise trouvés directement dans {enterprise_dir}, montage configuré")
                         else:
                             # Chercher tous les sous-dossiers qui pourraient contenir des addons
@@ -344,12 +367,14 @@ class OdooDockerGenerator:
                                 relative_path = os.path.relpath(potential_addons_dirs[0], inst)
                                 vols.append(f'./{relative_path}:/mnt/enterprise-addons:rw')
                                 enterprise_addons_configured = True
+                                enterprise_path = f'./{relative_path}'
                                 print(f"Dossier addons trouvé à {relative_path}, montage configuré")
                             else:
                                 print("AVERTISSEMENT: Aucun dossier addons trouvé dans l'archive Enterprise!")
                                 # Monter quand même le dossier enterprise complet au cas où
                                 vols.append('./enterprise:/mnt/enterprise-addons:rw')
                                 enterprise_addons_configured = True
+                                enterprise_path = './enterprise'
                 else:
                     print("AVERTISSEMENT: Le téléchargement Enterprise a échoué.")
             
@@ -373,98 +398,66 @@ class OdooDockerGenerator:
             else:
                 print(f"Warning: Le chemin d'addons externe '{path}' n'existe pas")
         
-        # Configuration du service Odoo
-        db_env = {
-            'POSTGRES_DB': 'postgres',  # Utiliser 'postgres' au lieu du db_name personnalisé pour éviter les erreurs
-            'POSTGRES_USER': 'odoo',
-            'POSTGRES_PASSWORD': 'odoo',
-            'PGHOST': 'db'
-        }
-        
-        # Convertir les variables d'environnement en liste comme attendu par Docker Compose
-        env_list = [f"{k}={v}" for k, v in db_env.items()]
-        
-        svc = {
-            'image': f"odoo:{version}",
-            'depends_on': ['db'],
-            'ports': [f"{port}:8069"],
-            'environment': env_list,
-            # Ajouter les paramètres de connexion à la commande de démarrage d'Odoo
-            'command': f'--config=/etc/odoo/odoo.conf',
-            'volumes': vols,
-            'restart': 'always'
-        }
-        
-        # Configuration docker-compose complète
-        comp = {
-            'services': {
-                'db': {
-                    'image': 'postgres:13',
-                    'environment': [
-                        'POSTGRES_DB=postgres',  # Utiliser 'postgres' au lieu du db_name personnalisé
-                        'POSTGRES_USER=odoo',
-                        'POSTGRES_PASSWORD=odoo'
-                    ],
-                    'volumes': [f'{postgres_volume_name}:/var/lib/postgresql/data'],
-                    'restart': 'always'
-                },
-                'odoo': svc
-            },
+        # Préparation des données pour le template
+        template_data = {
+            'odoo_version': version,
+            'edition_name': edition.capitalize(),
+            'is_enterprise': is_ee,
+            'external_port': port,
+            'db_name': db_name,
+            'postgres_db': 'postgres',
+            'postgres_user': 'odoo',
+            'postgres_password': 'odoo',
+            'postgres_volume': postgres_volume_name,
+            'odoo_volumes': vols,
+            'odoo_command': '--config=/etc/odoo/odoo.conf',
             'volumes': {
                 odoo_volume_name: None,
                 postgres_volume_name: None
-            }
+            },
+            'enterprise_path': enterprise_path if is_ee else None,
+            'project_name': project_name
         }
         
-        # Écrire le fichier docker-compose.yml
-        out = inst / 'docker-compose.yml'
-        with open(out, 'w') as f:
-            yaml.dump(comp, f, default_flow_style=False)
+        # Importer notre module d'utilitaires de templates
+        from templates_utils import render_template, render_with_yaml, load_template
         
-        # Créer un fichier README.md pour expliquer la configuration
-        readme_path = inst / 'README.md'
-        with open(readme_path, 'w') as f:
-            f.write(f"""# Odoo {version} {edition.capitalize()}
-
-## Configuration
-
-Cette installation est configurée pour utiliser Odoo {edition.capitalize()} {version}.
-
-- Port: {port}
-- Base de données: {db_name} (PostgreSQL 13)
-- Répertoire des modules Enterprise: ./enterprise/odoo/addons
-- Volumes Docker: 
-  - {odoo_volume_name} (pour les données Odoo)
-  - {postgres_volume_name} (pour la base de données)
-
-## Démarrage
-
-```bash
-docker-compose up -d
-```
-
-## Arrêt et suppression
-
-Pour arrêter les conteneurs sans supprimer les données:
-```bash
-docker-compose down
-```
-
-Pour arrêter les conteneurs et supprimer également les données:
-```bash
-docker-compose down -v
-```
-
-## Utilisation
-
-Accédez à Odoo via votre navigateur à l'adresse:
-http://localhost:{port}
-
-""")
-        
-        print(f"Généré: {out}")
-        print(f"Volumes Docker uniques créés: {odoo_volume_name}, {postgres_volume_name}")
-        return out, db_name
+        try:
+            # Générer le docker-compose.yml avec le template dédié
+            docker_compose_template = load_template('docker-compose.yml.j2')
+            docker_compose_content = render_with_yaml(docker_compose_template, template_data)
+            
+            # Écrire le fichier docker-compose.yml
+            out = inst / 'docker-compose.yml'
+            with open(out, 'w') as f:
+                f.write(docker_compose_content)
+            
+            # Générer le README.md avec le template dédié
+            readme_content = render_template('README.md.j2', template_data)
+            
+            # Créer un fichier README.md pour expliquer la configuration
+            readme_path = inst / 'README.md'
+            with open(readme_path, 'w') as f:
+                f.write(readme_content)
+            
+            # Créer un fichier .env pour définir le nom du projet Docker Compose
+            env_file = inst / '.env'
+            with open(env_file, 'w') as f:
+                f.write(f"COMPOSE_PROJECT_NAME={project_name}\n")
+            
+            print(f"Généré: {out}")
+            print(f"Volumes Docker uniques créés: {odoo_volume_name}, {postgres_volume_name}")
+            return out, db_name
+            
+        except FileNotFoundError as e:
+            print(f"Erreur: {e}")
+            print("Assurez-vous que les templates existent dans le dossier 'templates'")
+            raise
+        except Exception as e:
+            print(f"Erreur lors de la génération des fichiers à partir des templates: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
     def build_and_run(self, compose_file: Path, db_name: str, fresh_install=True):
         """

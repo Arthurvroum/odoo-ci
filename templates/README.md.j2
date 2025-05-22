@@ -1,0 +1,36 @@
+# Odoo {{ odoo_version }} {{ edition_name }}
+
+## Configuration
+
+Cette installation est configurée pour utiliser Odoo {{ edition_name }} {{ odoo_version }}.
+
+- Port: {{ external_port }}
+- Base de données: {{ db_name }} (PostgreSQL 13)
+- Répertoire des modules Enterprise: {{ enterprise_path if is_enterprise else "N/A" }}
+- Volumes Docker: 
+{% for volume_name, volume_config in volumes.items() %}
+  - {{ volume_name }}
+{% endfor %}
+
+## Démarrage
+
+```bash
+docker-compose up -d
+```
+
+## Arrêt et suppression
+
+Pour arrêter les conteneurs sans supprimer les données:
+```bash
+docker-compose down
+```
+
+Pour arrêter les conteneurs et supprimer également les données:
+```bash
+docker-compose down -v
+```
+
+## Utilisation
+
+Accédez à Odoo via votre navigateur à l'adresse:
+http://localhost:{{ external_port }}

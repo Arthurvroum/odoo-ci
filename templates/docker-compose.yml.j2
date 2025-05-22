@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:13
+    environment:
+      - POSTGRES_DB={{ postgres_db }}
+      - POSTGRES_USER={{ postgres_user }}
+      - POSTGRES_PASSWORD={{ postgres_password }}
+    volumes:
+      - {{ postgres_volume }}:/var/lib/postgresql/data
+    restart: always
+
+  odoo:
+    image: odoo:{{ odoo_version }}
+    depends_on:
+      - db
+    ports:
+      - "{{ external_port }}:8069"
+    environment:
+      - POSTGRES_DB={{ postgres_db }}
+      - POSTGRES_USER={{ postgres_user }}
+      - POSTGRES_PASSWORD={{ postgres_password }}
+      - PGHOST=db
+    command: {{ odoo_command }}
+    volumes:
+{% for volume in odoo_volumes %}
+      - {{ volume }}
+{% endfor %}
+    restart: always
+
+volumes:
+{% for volume_name, volume_config in volumes.items() %}
+  {{ volume_name }}: {{ volume_config if volume_config else 'null' }}
+{% endfor %}
