@@ -304,6 +304,8 @@ class OdooDockerGenerator:
         # Créer les sous-dossiers
         dirs = {k: inst / f"odoo-data/{k}" for k in ['addons', 'etc', 'filestore']}
         dirs['postgres'] = inst / 'postgresql'
+        # Créer un dossier custom-addons pour éviter l'erreur de montage dans Docker
+        dirs['custom-addons'] = inst / 'custom-addons'
         for d in dirs.values(): 
             d.mkdir(parents=True, exist_ok=True)
         
@@ -319,7 +321,8 @@ class OdooDockerGenerator:
         vols = [
             f'{odoo_volume_name}:/var/lib/odoo',
             './odoo-data/etc:/etc/odoo',
-            './odoo-data/addons:/mnt/extra-addons:rw'
+            './odoo-data/addons:/mnt/extra-addons:rw',
+            './custom-addons:/mnt/custom-addons:rw'  # Monter le dossier custom-addons par défaut
         ]
         
         # Gérer les addons Enterprise ou externes
@@ -383,17 +386,27 @@ class OdooDockerGenerator:
                 path = Path(external_addons_path)
                 if path.is_dir():
                     print(f"Utilisation du chemin d'addons externe: {path}")
-                    vols.append(f"{path.resolve()}:/mnt/custom-addons:rw")
+                    # Remplacer le montage par défaut de custom-addons par le chemin externe
+                    custom_addons_index = next((i for i, v in enumerate(vols) if '/mnt/custom-addons' in v), None)
+                    if custom_addons_index is not None:
+                        vols[custom_addons_index] = f"{path.resolve()}:/mnt/custom-addons:rw"
+                    else:
+                        vols.append(f"{path.resolve()}:/mnt/custom-addons:rw")
                     print(f"Addons externes montés depuis {path}")
                 else:
                     print(f"Warning: Le chemin d'addons externe '{path}' n'existe pas")
             elif not enterprise_addons_configured:
                 # Si aucun addons externes et pas d'addons Enterprise, afficher un avertissement
-                print("AVERTISSEMENT: Aucun chemin d'addons configuré!")
+                print("AVERTISSEMENT: Aucun chemin d'addons Enterprise configuré!")
         elif external_addons_path:
             path = Path(external_addons_path)
             if path.is_dir():
-                vols.append(f"{path.resolve()}:/mnt/custom-addons:rw")
+                # Remplacer le montage par défaut de custom-addons par le chemin externe
+                custom_addons_index = next((i for i, v in enumerate(vols) if '/mnt/custom-addons' in v), None)
+                if custom_addons_index is not None:
+                    vols[custom_addons_index] = f"{path.resolve()}:/mnt/custom-addons:rw"
+                else:
+                    vols.append(f"{path.resolve()}:/mnt/custom-addons:rw")
                 print(f"Addons externes montés depuis {path}")
             else:
                 print(f"Warning: Le chemin d'addons externe '{path}' n'existe pas")
@@ -444,6 +457,24 @@ class OdooDockerGenerator:
             env_file = inst / '.env'
             with open(env_file, 'w') as f:
                 f.write(f"COMPOSE_PROJECT_NAME={project_name}\n")
+            
+            # Créer un fichier .gitignore dans le dossier custom-addons
+            try:
+                gitignore_content = load_template('custom-addons.gitignore.j2')
+                gitignore_path = inst / 'custom-addons' / '.gitignore'
+                with open(gitignore_path, 'w') as f:
+                    f.write(gitignore_content)
+            except Exception as e:
+                print(f"Note: Impossible de créer le fichier .gitignore pour custom-addons: {e}")
+            
+            # Générer le script list_modules.py pour lister les modules clients
+            list_modules_content = render_template('list_modules.py.j2', template_data)
+            list_modules_path = inst / 'list_modules.py'
+            with open(list_modules_path, 'w') as f:
+                f.write(list_modules_content)
+            # Rendre le script exécutable
+            os.chmod(list_modules_path, 0o755)
+            print(f"Script de liste des modules créé: {list_modules_path}")
             
             print(f"Généré: {out}")
             print(f"Volumes Docker uniques créés: {odoo_volume_name}, {postgres_volume_name}")

@@ -30,7 +30,32 @@ Pour arrêter les conteneurs et supprimer également les données:
 docker-compose down -v
 ```
 
+## Ajout de modules personnalisés
+
+Vous pouvez ajouter vos propres modules Odoo dans le dossier `custom-addons`. 
+Ce dossier est automatiquement monté dans le conteneur Odoo à l'emplacement `/mnt/custom-addons`.
+
+Chaque dossier contenant un fichier `__manifest__.py` sera considéré comme un module Odoo valide.
+
 ## Utilisation
 
 Accédez à Odoo via votre navigateur à l'adresse:
 http://localhost:{{ external_port }}
+
+## Outils disponibles
+
+### Liste des modules clients
+
+Pour lister tous les modules clients installés, exécutez:
+```bash
+./list_modules.py
+```
+
+Ce script recherche tous les modules Odoo (identifiés par la présence d'un fichier `__manifest__.py`) 
+dans les répertoires suivants:
+- odoo-data/addons
+- enterprise
+- enterprise/odoo/addons
+- custom-addons
+
+Les résultats sont affichés à l'écran et enregistrés dans un fichier `modules.json`.

@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Script pour lister les modules clients (addons) dans le workspace Odoo.
+Un module est identifié par la présence d'un fichier __manifest__.py.
+"""
+
+import os
+import glob
+from pathlib import Path
+import json
+
+def find_modules(start_path='.'):
+    """
+    Trouve tous les modules Odoo (dossiers contenant un fichier __manifest__.py)
+    dans le chemin spécifié et ses sous-dossiers.
+    
+    Args:
+        start_path (str): Chemin où commencer la recherche
+        
+    Returns:
+        list: Liste des chemins vers les modules trouvés
+    """
+    modules = []
+    
+    # Convertir en chemin absolu si le chemin est relatif
+    abs_path = os.path.abspath(start_path)
+    print(f"Recherche des modules dans: {abs_path}")
+    
+    # Rechercher tous les fichiers __manifest__.py
+    manifest_files = glob.glob(f"{abs_path}/**/__manifest__.py", recursive=True)
+    
+    if not manifest_files:
+        print("Aucun module trouvé.")
+        return []
+    
+    for manifest_file in manifest_files:
+        module_dir = os.path.dirname(manifest_file)
+        module_name = os.path.basename(module_dir)
+        rel_path = os.path.relpath(module_dir, abs_path)
+        
+        # Charger les infos du module depuis le manifest
+        try:
+            # Extraire les informations du fichier manifest sans l'exécuter
+            with open(manifest_file, 'r') as f:
+                manifest_content = f.read()
+                
+            # Evaluer le contenu de manière sécurisée pour extraire les informations
+            # Note: cette approche n'est pas parfaite mais évite d'exécuter du code
+            manifest_dict = eval(manifest_content, {'__builtins__': {}})
+            
+            modules.append({
+                'name': module_name,
+                'path': rel_path,
+                'display_name': manifest_dict.get('name', module_name),
+                'summary': manifest_dict.get('summary', ''),
+                'version': manifest_dict.get('version', ''),
+                'author': manifest_dict.get('author', ''),
+                'depends': manifest_dict.get('depends', []),
+                'category': manifest_dict.get('category', ''),
+                'manifest_path': manifest_file
+            })
+            
+        except Exception as e:
+            print(f"Erreur lors du traitement du module {module_name}: {e}")
+            modules.append({
+                'name': module_name,
+                'path': rel_path,
+                'display_name': module_name,
+                'manifest_path': manifest_file,
+                'error': str(e)
+            })
+    
+    return modules
+
+def list_modules(search_paths):
+    """
+    Parcourt les chemins spécifiés et liste tous les modules Odoo trouvés.
+    
+    Args:
+        search_paths (list): Liste des chemins où chercher des modules
+        
+    Returns:
+        dict: Dictionnaire des modules trouvés par chemin
+    """
+    result = {}
+    
+    for path in search_paths:
+        if os.path.isdir(path):
+            print(f"\nRecherche dans: {path}")
+            modules = find_modules(path)
+            if modules:
+                result[path] = modules
+                print(f"Trouvé {len(modules)} module(s) dans {path}")
+                for module in modules:
+                    display_name = module.get('display_name', module['name'])
+                    summary = module.get('summary', '')
+                    info = f"{display_name} ({module['name']})"
+                    if summary:
+                        info += f": {summary}"
+                    print(f"  - {info}")
+    
+    return result
+
+def main():
+    # Chemins Odoo classiques à vérifier
+    base_paths = [
+        'odoo-data/addons',         # Modules additionnels
+        'enterprise',               # Modules Enterprise
+        'enterprise/odoo/addons',   # Modules Enterprise dans la structure odoo/addons
+        'custom-addons'             # Modules personnalisés
+    ]
+    
+    # Ajouter le répertoire actuel pour trouver des modules à la racine
+    base_paths.append('.')
+    
+    print("=== Recherche des modules Odoo ===")
+    all_modules = list_modules(base_paths)
+    
+    # Générer un rapport en JSON pour une utilisation ultérieure
+    with open('modules.json', 'w') as f:
+        json.dump(all_modules, f, indent=2)
+    
+    # Afficher un résumé
+    total_modules = sum(len(modules) for modules in all_modules.values())
+    print(f"\n=== Résumé ===")
+    print(f"Total des modules trouvés: {total_modules}")
+    print(f"Rapport détaillé sauvegardé dans: {os.path.abspath('modules.json')}")
+
+if __name__ == '__main__':
+    main()
