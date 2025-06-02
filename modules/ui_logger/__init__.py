@@ -257,9 +257,9 @@ class UILogger:
             separator = f"{Fore.CYAN}{'═' * width}{Style.RESET_ALL}"
             
             # Afficher la section avec des séparateurs
-            print(separator)
+            print(f"\n{separator}")
             print(f"{Fore.CYAN}{Style.BRIGHT}{title}{Style.RESET_ALL}")
-            print(separator)
+            print(f"{separator}\n")
         else:
             # Version sans couleurs
             print(f"\n{title}\n{'=' * len(title)}")

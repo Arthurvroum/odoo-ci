@@ -93,16 +93,38 @@ class DockerManager:
             if not fresh_install:
                 logger.odoo(f"Initialisation de la base de données Odoo '{db_name}'...")
                 # Utiliser le nom de base de données spécifique à cette instance
-                try:
-                    subprocess.run(
-                        f"docker-compose exec -T odoo odoo -d {db_name} --stop-after-init -i base",
-                        shell=True, check=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE
-                    )
-                    logger.success(f"Base de données '{db_name}' initialisée avec succès")
-                except subprocess.CalledProcessError as e:
-                    logger.error(f"Erreur lors de l'initialisation de la base de données: {e}")
+                
+                # Ajout d'un délai supplémentaire pour s'assurer que PostgreSQL est prêt
+                logger.start_spinner("Attente que la base de données soit prête")
+                time.sleep(5)  # 5 secondes d'attente supplémentaires
+                logger.stop_spinner(success=True)
+                
+                # Ajout d'un mécanisme de nouvelle tentative pour gérer les problèmes de concurrence
+                max_attempts = 3
+                attempt = 0
+                success = False
+                
+                while attempt < max_attempts and not success:
+                    attempt += 1
+                    try:
+                        if attempt > 1:
+                            logger.info(f"Tentative {attempt}/{max_attempts} d'initialisation de la base de données...")
+                            # Attendre un peu plus longtemps entre les tentatives
+                            time.sleep(attempt * 3)
+                        
+                        result = subprocess.run(
+                            f"docker-compose exec -T odoo odoo -d {db_name} --stop-after-init -i base",
+                            shell=True, check=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE
+                        )
+                        logger.success(f"Base de données '{db_name}' initialisée avec succès")
+                        success = True
+                    except subprocess.CalledProcessError as e:
+                        if attempt < max_attempts:
+                            logger.warning(f"Échec de l'initialisation (tentative {attempt}/{max_attempts}): {e}")
+                        else:
+                            logger.error(f"Erreur lors de l'initialisation de la base de données après {max_attempts} tentatives: {e}")
             else:
                 logger.odoo("Mode installation fraîche: Odoo va démarrer sans base de données préconfigurée")
                 logger.info("Vous pourrez créer une nouvelle base de données via l'interface web")
